@@ -6,7 +6,7 @@ Runnable Next.js App Router / TypeScript application with PostgreSQL, Prisma, Ta
 
 ## Run locally on Windows
 
-Use Node.js 24 LTS, Git and Docker Desktop with Linux containers. Clone your private repository into `D:\DARK-MARKETS`. This build is in the supplied `dark-markets2` checkout; it has not been published to a new GitHub repository because the supplied GitHub credential is invalid.
+Use Node.js 24 LTS, Git and Docker Desktop with Linux containers. Clone your private repository into `D:\DARK-MARKETS`. This build is in the supplied `dark-markets2` checkout; it has not been published. Connected GitHub inspection found both `dark-markets` and `dark-markets2` are public, contrary to the private-repository requirement. The CLI credential is also invalid, and the available connector cannot change repository visibility.
 
 PowerShell:
 

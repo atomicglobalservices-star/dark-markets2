@@ -15,7 +15,7 @@
 
 ## External setup or approval needed
 
-- Valid GitHub authentication to create the requested private `dark-markets` repository. The supplied attached remote is `dark-markets2`; it was not renamed, pushed to, or replaced.
+- A private GitHub target: connected inspection confirmed both `atomicglobalservices-star/dark-markets` and the attached `dark-markets2` are public. The available connector cannot change repository visibility; the CLI credential is invalid. No source was pushed to either public repository. Make the target private before publication.
 - DARK OS assets for exact brand parity.
 - Licensed market, news and calendar sources; production SMTP; AI provider credentials.
 - Stripe products/prices, test integration verification, tax/refund policies and separate approval for live charges.
