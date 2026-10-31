@@ -1,0 +1,41 @@
+name: dark-markets
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: dark
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dark_local_only}
+      POSTGRES_DB: dark_markets
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dark -d dark_markets"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  mail:
+    image: axllent/mailpit:v1.27
+    ports: ["127.0.0.1:1025:1025", "127.0.0.1:8025:8025"]
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://dark:${POSTGRES_PASSWORD:-dark_local_only}@db:5432/dark_markets?schema=public
+      SMTP_HOST: mail
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+    command: sh -c "npm run db:migrate && npm run db:seed && npm run start"
+    restart: unless-stopped
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://dark:${POSTGRES_PASSWORD:-dark_local_only}@db:5432/dark_markets?schema=public
+      SMTP_HOST: mail
+    depends_on:
+      app: { condition: service_started }
+    command: sh -c "npm run db:migrate && npm run worker"
+    restart: unless-stopped
+volumes:
+  postgres_data:

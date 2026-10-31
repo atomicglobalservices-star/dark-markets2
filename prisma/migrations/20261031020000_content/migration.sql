@@ -1,0 +1,2 @@
+CREATE TABLE "Snapshot" ("key" TEXT NOT NULL, "content" JSONB NOT NULL, "status" TEXT NOT NULL, "fetchedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "sourceError" TEXT, CONSTRAINT "Snapshot_pkey" PRIMARY KEY ("key"));
+ALTER TABLE "Alert" ADD COLUMN "eventId" TEXT;

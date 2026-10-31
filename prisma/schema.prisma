@@ -1,0 +1,149 @@
+generator client {
+ provider = "prisma-client-js"
+ engineType = "client"
+ output = "../node_modules/.prisma/client"
+}
+datasource db {
+ provider = "postgresql"
+ url = env("DATABASE_URL")
+}
+model User {
+ id String @id @default(cuid())
+ email String @unique
+ name String
+ passwordHash String
+ verified Boolean @default(false)
+ role String @default("USER")
+ plan String
+ status String @default("trialing")
+ trialEndsAt DateTime
+ customerId String? @unique
+ subscriptionId String? @unique
+ subscriptionEndsAt DateTime?
+ preferences Json @default("{}")
+ createdAt DateTime @default(now())
+ sessions Session[]
+ tokens Token[]
+ watchlist Watchlist[]
+ alerts Alert[]
+ notifications Notification[]
+ reports Report[]
+ invoices Invoice[]
+ outbox Outbox[]
+ support Support[]
+}
+model Session {
+ id String @id
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ expiresAt DateTime
+}
+model Token {
+ id String @id
+ kind String
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ expiresAt DateTime
+}
+model Watchlist {
+ id String @id @default(cuid())
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ symbol String
+ @@unique([userId,symbol])
+}
+model Alert {
+ id String @id @default(cuid())
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ symbol String
+ eventId String?
+ kind String @default("price_above")
+ threshold Float
+ email Boolean @default(false)
+ triggeredAt DateTime?
+ createdAt DateTime @default(now())
+}
+model Notification {
+ id String @id @default(cuid())
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ title String
+ read Boolean @default(false)
+ createdAt DateTime @default(now())
+}
+model Report {
+ id String @id @default(cuid())
+ userId String?
+ user User? @relation(fields:[userId], references:[id], onDelete:Cascade)
+ title String
+ question String?
+ content Json
+ provider String
+ generatedAt DateTime @default(now())
+}
+model Invoice {
+ id String @id @default(cuid())
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ amount Int
+ status String
+ provider String
+ createdAt DateTime @default(now())
+}
+model Job {
+ id String @id
+ kind String
+ status String @default("pending")
+ attempts Int @default(0)
+ runAt DateTime @default(now())
+ lockedAt DateTime?
+ error String?
+ updatedAt DateTime @updatedAt
+}
+model Audit {
+ id String @id @default(cuid())
+ actorId String
+ action String
+ detail String
+ createdAt DateTime @default(now())
+}
+model RateLimit {
+ key String @id
+ count Int @default(1)
+ resetsAt DateTime
+}
+model WebhookEvent {
+ id String @id
+ createdAt DateTime @default(now())
+}
+model Support {
+ id String @id @default(cuid())
+ userId String
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ message String
+ status String @default("open")
+ createdAt DateTime @default(now())
+}
+
+model Outbox {
+ user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+ id String @id @default(cuid())
+ userId String
+ to String
+ subject String
+ text String
+ status String @default("pending")
+ attempts Int @default(0)
+ runAt DateTime @default(now())
+ sentAt DateTime?
+ createdAt DateTime @default(now())
+}
+
+model Snapshot {
+ key String @id
+ content Json
+ status String
+ fetchedAt DateTime @default(now())
+ sourceError String?
+}

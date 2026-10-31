@@ -1,0 +1,46 @@
+{
+  "name": "dark-markets",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "npm run db:generate && next build",
+    "start": "next start --hostname 0.0.0.0",
+    "test": "tsx --test tests/domain.test.ts",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=.env prisma/seed.ts",
+    "worker": "tsx --env-file-if-exists=.env scripts/worker.ts",
+    "db:migrate:prisma": "prisma migrate deploy",
+    "test:integration": "tsx --env-file-if-exists=.env --test tests/integration.test.ts",
+    "db:generate": "node scripts/generate-client.cjs && node node_modules/@prisma/client/generator-build/index.js < work/prisma-generate.json && node scripts/verify-client.cjs"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "6.19.3",
+    "@prisma/client": "6.19.3",
+    "@tailwindcss/postcss": "^4.1.0",
+    "bcryptjs": "^3.0.2",
+    "lucide-react": "^0.468.0",
+    "next": "^16.0.0",
+    "nodemailer": "^7.0.0",
+    "pg": "^8.23.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "recharts": "^3.3.0",
+    "stripe": "^19.0.0",
+    "tailwindcss": "^4.1.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@prisma/internals": "6.19.3",
+    "@types/node": "^24.0.0",
+    "@types/nodemailer": "^7.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "prettier": "^3.9.10",
+    "prisma": "6.19.3",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
