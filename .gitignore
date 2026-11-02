@@ -7,3 +7,5 @@ work/
 coverage/
 *.log
 *.tsbuildinfo
+
+__pycache__/

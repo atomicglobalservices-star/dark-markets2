@@ -1,4 +1,8 @@
+import { collectFundamentals } from "./sec";
 import { db } from "./db";
+import { nativeAnalysisAllowed } from "./native-policy";
+import { isCoreNative } from "./core-markets";
+import { collectAdditionalMarkets } from "./feeds/additional-collection";
 import { market } from "./market";
 import { generateReport } from "./reports";
 import { triggers, entitlement } from "./domain";
@@ -9,14 +13,15 @@ import {
   type Article,
   type EconomicEvent,
 } from "./content";
-const intervals: Record<string, number> = {
+export const intervals: Record<string, number> = {
   market: 60000,
+  fundamentals: 3600000,
   alerts: 60000,
   reports: 86400000,
   weekly: 604800000,
   email: 15000,
-  news: 300000,
-  calendar: 300000,
+  news: 3600000,
+  calendar: 3600000,
   trials: 3600000,
   cleanup: 86400000,
 };
@@ -44,16 +49,31 @@ export async function tick() {
       data: { status: "running", lockedAt: new Date() },
     });
     if (!claim.count) continue;
+    let jobWarning: string | null = null;
     try {
+      if (job.kind === "fundamentals") await collectFundamentals();
       if (job.kind === "news" || job.kind === "calendar")
         await ingest(job.kind);
       if (job.kind === "market") {
         const result = await market();
-        if (result.error) throw new Error(result.error);
+        if (
+          result.error &&
+          !result.quotes.some(
+            (q) => q.status === "realtime" || q.status === "delayed",
+          )
+        )
+          throw new Error(result.error);
+        jobWarning = result.error;
+        await collectAdditionalMarkets();
       }
       if (job.kind === "reports" || job.kind === "weekly") {
-        const { quotes } = await market();
-        const groups = ["Global", ...new Set(quotes.map((q) => q.category))];
+        const snapshot = await market();
+        const quotes = snapshot.quotes.filter(
+          (q) => isCoreNative(q) && nativeAnalysisAllowed(q, 26),
+        );
+        const groups = quotes.length
+          ? ["Global", ...new Set(quotes.map((q) => q.category))]
+          : [];
         for (const group of groups) {
           const report = await generateReport(
             undefined,
@@ -98,17 +118,27 @@ export async function tick() {
               ? !!article
               : a.kind === "economic_event"
                 ? !!event &&
+                  !event.dataStale &&
+                  !event.tentative &&
                   untilEvent >= 0 &&
                   untilEvent <= a.threshold * 3600000
                 : false;
-          if (!quote || (!special && !triggers(a.kind, a.threshold, quote)))
+          if (
+            !quote ||
+            (!special &&
+              !nativeAnalysisAllowed(
+                quote,
+                ["price_above", "price_below"].includes(a.kind) ? 0 : 26,
+              )) ||
+            (!special && !triggers(a.kind, a.threshold, quote))
+          )
             continue;
           const title =
             a.kind === "asset_news"
               ? `${news?.status === "demonstration" ? "DEMO: " : ""}${a.symbol} story: ${article?.title} — ${article?.source}`
               : a.kind === "economic_event"
                 ? `${calendar?.status === "demonstration" ? "DEMO: " : ""}${event?.title} at ${event?.date} ${event?.time} UTC`
-                : `${quote.status === "demonstration" ? "DEMO: " : ""}${a.symbol} ${a.kind.replaceAll("_", " ")} ${a.threshold} — observation ${quote.asOf}`;
+                : `${quote.status === "demonstration" ? "DEMO: " : ""}${a.symbol} ${a.kind.replaceAll("_", " ")} ${a.threshold} — ${quote.quoteCurrency || "USD"} · ${quote.source} · observation ${quote.asOf}`;
           await db.$transaction(async (tx) => {
             const claim = await tx.alert.updateMany({
               where: { id: a.id, triggeredAt: null },
@@ -210,9 +240,9 @@ export async function tick() {
       await db.job.update({
         where: { id: job.id },
         data: {
-          status: "healthy",
+          status: jobWarning ? "degraded" : "healthy",
           attempts: 0,
-          error: null,
+          error: jobWarning,
           lockedAt: null,
           runAt: new Date(Date.now() + intervals[job.kind]),
         },

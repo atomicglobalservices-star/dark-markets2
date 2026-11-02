@@ -1,6 +1,22 @@
 "use client";
+import ExternalChart from "./external-chart";
+import CalendarSchedule from "./calendar-schedule";
+import DashboardCalendarBrief from "./dashboard-calendar-brief";
+import MarketTicker from "./market-ticker";
+import type { EvaluationQuote } from "@/lib/feeds/additional-providers";
+import type { SpotReference } from "@/lib/spot-display";
+import ExternalQuotes from "./external-quotes";
+import MarketDirectory from "./market-directory";
+import MarketDataEvaluation from "./market-data-evaluation";
+import MyWorkspace from "./my-workspace";
+import { marketDirectory } from "@/lib/market-directory";
+import { secCompanies, periodKind } from "@/lib/sec-data";
+import type { Article, EconomicEvent } from "@/lib/content-adapters";
+import { instruments } from "@/lib/feeds/types";
+import { isCoreNative } from "@/lib/core-markets";
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import {
   Area,
   AreaChart,
@@ -45,7 +61,13 @@ import {
   Layers,
   LifeBuoy,
 } from "lucide-react";
-import { demoQuotes, demoNews, demoEvents, type Quote } from "@/lib/market";
+import {
+  demoQuotes,
+  mergeObservations,
+  demoNews,
+  demoEvents,
+  type Quote,
+} from "@/lib/market";
 type User = {
   id: string;
   name: string;
@@ -69,13 +91,35 @@ type Report = {
     generatedAt: string;
     interpretation: string;
     facts: { symbol: string; price: number; changePercent: number }[];
-    calculations: { symbol: string; sma14: number; rsi14: number }[];
+    calculations: {
+      symbol: string;
+      sma14: number | null;
+      rsi14: number | null;
+      volume?: number | null;
+      volatility?: number | null;
+      historicalReturn?: number | null;
+    }[];
     dataAsOf: {
       symbol: string;
       timestamp: string;
       source: string;
       status: string;
     }[];
+    correlations?: {
+      left: string;
+      right: string;
+      value: number | null;
+      method: string;
+    }[];
+    limitations?: string[];
+    evidence?: {
+      news?: { status: string; exportAllowed?: boolean; items: Article[] };
+      calendar?: {
+        status: string;
+        exportAllowed?: boolean;
+        items: EconomicEvent[];
+      };
+    };
     disclosure: string;
   };
 };
@@ -92,6 +136,7 @@ async function api(path: string, method = "GET", data?: unknown) {
 const nav = [
   ["dashboard", "Overview", LayoutDashboard],
   ["markets", "Markets", ChartNoAxesCombined],
+  ["workspace", "My Workspace", Layers],
   ["watchlist", "Watchlist", Star],
   ["intelligence", "AI Intelligence", Sparkles],
   ["news", "Market news", Newspaper],
@@ -109,12 +154,15 @@ const categories = [
   "ETFs",
   "CFDs",
 ];
-const fmt = (n: number) =>
-  new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: n < 2 ? 5 : 2,
-    minimumFractionDigits: n < 2 ? 4 : 2,
-  }).format(n);
-function Delta({ value }: { value: number }) {
+const fmt = (n: number | null) =>
+  n === null
+    ? "Unavailable"
+    : new Intl.NumberFormat("en-US", {
+        maximumFractionDigits: n < 2 ? 5 : 2,
+        minimumFractionDigits: n < 2 ? 4 : 2,
+      }).format(n);
+function Delta({ value }: { value: number | null }) {
+  if (value === null) return <span className="muted">Unavailable</span>;
   return (
     <span className={value >= 0 ? "positive" : "negative"}>
       {value >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}{" "}
@@ -130,8 +178,8 @@ function Spark({ q }: { q: Quote }) {
         <Area
           type="monotone"
           dataKey="price"
-          stroke={q.change >= 0 ? "#a3e635" : "#f27788"}
-          fill={q.change >= 0 ? "#a3e635" : "#f27788"}
+          stroke={(q.change ?? 0) >= 0 ? "#359ce6" : "#f27788"}
+          fill={(q.change ?? 0) >= 0 ? "#359ce6" : "#f27788"}
           fillOpacity={0.06}
           strokeWidth={1.5}
           isAnimationActive={false}
@@ -141,10 +189,39 @@ function Spark({ q }: { q: Quote }) {
     </ResponsiveContainer>
   );
 }
+const marketGroupInformation: Record<string, string> = {
+  "All markets":
+    "Explore crypto, forex, stocks, indices, commodities, ETFs and broker-specific CFDs. Choose a market tab to focus the quotes, charts and information on that group.",
+  Crypto:
+    "Crypto spot pairs trade around the clock. Prices retain their exchange and quote currency; USD, USDT and EUR pairs are separate instruments. Select an asset above for its native chart and source details.",
+  Forex:
+    "Forex quotes show one currency priced in another. FX_IDC charts are spot reference rates rather than broker execution quotes. Markets generally trade during the working week; closed-market prices reflect the latest available session.",
+  Stocks:
+    "Stocks represent shares in listed companies. Prices depend on the displayed venue, session and feed delays. SEC records below contain historical company filings rather than live prices; coverage is limited to the listed SEC issuers.",
+  Indices:
+    "Cash indices track baskets of securities and are quoted in index points. They are distinct from ETFs, index futures and broker CFDs. Updates follow the relevant market session.",
+  Commodities:
+    "Gold (XAU/USD) and Silver (XAG/USD) show spot-metal references. WTI, Brent, Natural Gas and Copper show explicitly attributed OANDA commodity CFDs. Broker prices can differ from spot references. Futures are available separately in broader discovery.",
+  ETFs: "Exchange-traded funds are listed securities that hold or track assets. Their share prices can differ from the value of underlying holdings. A gold ETF is a fund share rather than a spot-gold quote; stock-market sessions and feed delays apply.",
+  CFDs: "CFDs are broker-specific derivatives. Displayed OANDA quotes belong to those contracts rather than the underlying cash index or commodity. Latest prices may reflect a closed session or vendor delay. This page does not execute trades.",
+};
+
 export function Terminal({ page }: { page: string }) {
+  const [adminView, setAdminView] = useState(false);
+  const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
+  const [workspaceBusyId, setWorkspaceBusyId] = useState("");
   const [user, setUser] = useState<User | null>(null),
     [loaded, setLoaded] = useState(false),
-    [quotes, setQuotes] = useState<Quote[]>(demoQuotes()),
+    [rawQuotes, setQuotes] = useState<Quote[]>(
+      page === "home" ? demoQuotes() : [],
+    ),
+    [spotReferences, setSpotReferences] = useState<SpotReference[]>([]),
+    [fxReferences, setFxReferences] = useState<EvaluationQuote[]>([]),
+    [stockReferences, setStockReferences] = useState<EvaluationQuote[]>([]),
+    [indexReferences, setIndexReferences] = useState<EvaluationQuote[]>([]),
+    [commodityReferences, setCommodityReferences] = useState<EvaluationQuote[]>(
+      [],
+    ),
     [feedError, setFeedError] = useState(""),
     [query, setQuery] = useState(""),
     [category, setCategory] = useState("All markets"),
@@ -152,8 +229,17 @@ export function Terminal({ page }: { page: string }) {
     [period, setPeriod] = useState("3D"),
     [watch, setWatch] = useState<string[]>([]),
     [reports, setReports] = useState<Report[]>([]),
-    [news, setNews] = useState(demoNews),
-    [events, setEvents] = useState(demoEvents),
+    [news, setNews] = useState<Article[]>(
+      demoNews.map((n) => ({ ...n, publishedAt: "2026-10-30T20:00:00Z" })),
+    ),
+    [events, setEvents] = useState<EconomicEvent[]>(
+      demoEvents.map((e) => ({
+        ...e,
+        impact: e.impact as EconomicEvent["impact"],
+        source: "Educational fixture",
+        url: "/disclosures",
+      })),
+    ),
     [alerts, setAlerts] = useState<any[]>([]),
     [notifications, setNotifications] = useState<any[]>([]),
     [toast, setToast] = useState(""),
@@ -180,6 +266,77 @@ export function Terminal({ page }: { page: string }) {
     [sort, setSort] = useState("directory"),
     [newsStatus, setNewsStatus] = useState("demonstration"),
     [calendarStatus, setCalendarStatus] = useState("demonstration");
+  const [timeframe, setTimeframe] = useState("1h");
+  const [chartData, setChartData] = useState<any>(null),
+    [chartLoading, setChartLoading] = useState(false),
+    [chartError, setChartError] = useState("");
+  const [countryFilter, setCountryFilter] = useState(""),
+    [currencyFilter, setCurrencyFilter] = useState("");
+  const [providerHealth, setProviderHealth] = useState<any>(null);
+  const [fundamentalPeriod, setFundamentalPeriod] = useState("all");
+  const [broaderDiscovery, setBroaderDiscovery] = useState(false);
+  const [visualChart, setVisualChart] = useState({
+    symbol: "NASDAQ:AAPL",
+    interval: "D",
+  });
+  function openVisualChart(symbol: string, interval = "D") {
+    setVisualChart({ symbol, interval });
+    setModal("visual-chart");
+  }
+  const [embedSymbol, setEmbedSymbol] = useState("NASDAQ:AAPL"),
+    [embedEnabled, setEmbedEnabled] = useState(true);
+  const [companySymbol, setCompanySymbol] = useState("AAPL"),
+    [fundamentals, setFundamentals] = useState<any>(null),
+    [fundamentalLoading, setFundamentalLoading] = useState(false);
+  const [collectionPanel, setCollectionPanel] = useState<any>(null),
+    [calendarImpact, setCalendarImpact] = useState(""),
+    [calendarDate, setCalendarDate] = useState("");
+  useEffect(() => {
+    if (!user?.access || page !== "markets" || category !== "Stocks") return;
+    let active = true;
+    setFundamentalLoading(true);
+    api("fundamentals?symbol=" + encodeURIComponent(companySymbol))
+      .then((d) => {
+        if (active) setFundamentals(d);
+      })
+      .catch(() => {
+        if (active) setFundamentals({ status: "unavailable" });
+      })
+      .finally(() => {
+        if (active) setFundamentalLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [companySymbol, user?.access, page, category]);
+  useEffect(() => {
+    if (!user?.access || !["markets", "dashboard"].includes(page)) return;
+    let active = true;
+    api("data/settings")
+      .then((d) => {
+        if (active) setEmbedEnabled(d.tradingViewEnabled);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [user?.access, page]);
+  useEffect(() => {
+    if (page !== "admin" || user?.role !== "ADMIN") return;
+    let active = true;
+    const load = () =>
+      api("data/providers")
+        .then((d) => {
+          if (active) setCollectionPanel(d);
+        })
+        .catch(() => {});
+    void load();
+    const timer = setInterval(load, 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [page, user?.role]);
   const notify = useCallback((message: string) => {
     setToast(message);
     setTimeout(() => setToast(""), 6000);
@@ -201,11 +358,16 @@ export function Terminal({ page }: { page: string }) {
     api("markets")
       .then((d) => {
         setQuotes(d.quotes);
+        setSpotReferences(d.spotReferences || []);
+        setFxReferences(d.fxReferences || []);
+        setCommodityReferences(d.commodityReferences || []);
+        setStockReferences(d.stockReferences || []);
+        setIndexReferences(d.indexReferences || []);
         setFeedError(d.error || "");
       })
       .catch(() =>
         setFeedError(
-          "Market service unavailable. Showing bundled demonstration fixtures.",
+          "Market service unavailable. Native prices are unavailable.",
         ),
       );
     if (new URLSearchParams(location.search).get("plan") === "STANDARD")
@@ -216,14 +378,38 @@ export function Terminal({ page }: { page: string }) {
       api("markets")
         .then((d) => {
           setQuotes(d.quotes);
+          setSpotReferences(d.spotReferences || []);
+          setFxReferences(d.fxReferences || []);
+          setCommodityReferences(d.commodityReferences || []);
+          setStockReferences(d.stockReferences || []);
+          setIndexReferences(d.indexReferences || []);
           setFeedError(d.error || "");
         })
         .catch(() =>
           setFeedError("Market refresh failed; check source timestamps."),
         );
-    }, 60000);
+    }, 15000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (!user?.access) return;
+    const stream = new EventSource("/api/markets/stream");
+    stream.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const result = mergeObservations(payload.observations);
+        setQuotes(result.quotes);
+        setFeedError(result.error || "");
+      } catch {
+        setFeedError("Invalid stream update; polling fallback active.");
+      }
+    };
+    stream.onerror = () =>
+      setFeedError(
+        "Streaming unavailable or reconnecting; polling fallback active. Check source timestamps.",
+      );
+    return () => stream.close();
+  }, [user?.access]);
   useEffect(() => {
     if (!user) return;
     if (user.access) {
@@ -302,6 +488,40 @@ export function Terminal({ page }: { page: string }) {
       setBusy(false);
     }
   }
+  useEffect(() => {
+    if (page !== "markets" || !user) return;
+    let active = true;
+    api("workspace")
+      .then((data) => {
+        if (active)
+          setWorkspaceIds(
+            data.items.map(
+              (item: { instrumentId: string }) => item.instrumentId,
+            ),
+          );
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [page, user?.id]);
+  async function addWorkspaceInstrument(instrumentId: string) {
+    if (workspaceBusyId) return;
+    setWorkspaceBusyId(instrumentId);
+    try {
+      const data = await api("workspace", "POST", { instrumentId });
+      setWorkspaceIds(
+        data.items.map((item: { instrumentId: string }) => item.instrumentId),
+      );
+      notify("Added to My Workspace");
+    } catch (error) {
+      notify(
+        error instanceof Error ? error.message : "Could not add instrument",
+      );
+    } finally {
+      setWorkspaceBusyId("");
+    }
+  }
   async function toggleWatch(symbol: string) {
     await action(async () => {
       await api("watchlist", watch.includes(symbol) ? "DELETE" : "POST", {
@@ -337,26 +557,85 @@ export function Terminal({ page }: { page: string }) {
           setError(e.message);
         });
   }, [page, user, selected, compareSymbol]);
+  const quotes = user?.access ? rawQuotes.filter(isCoreNative) : rawQuotes;
   const q = quotes.find((q) => q.symbol === selected) || quotes[0];
+  useEffect(() => {
+    setChartData(null);
+    setChartError("");
+    if (!user?.access || !q || q.status === "demonstration") {
+      setChartLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setChartLoading(true);
+    fetch(
+      `/api/markets/history?instrument=${encodeURIComponent(q.instrumentId || q.symbol)}&timeframe=${timeframe}`,
+      { signal: controller.signal },
+    )
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || "History unavailable");
+        return data;
+      })
+      .then((data) =>
+        setChartData({ ...data, key: selected + ":" + timeframe }),
+      )
+      .catch((e) => {
+        if (e.name !== "AbortError") setChartError(e.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setChartLoading(false);
+      });
+    return () => controller.abort();
+  }, [selected, timeframe, q?.provider, q?.status, user?.access]);
+  useEffect(() => {
+    if (page !== "admin" || user?.role !== "ADMIN") return;
+    let active = true;
+    const load = () =>
+      api("markets/health")
+        .then((d) => {
+          if (active) setProviderHealth(d);
+        })
+        .catch(() => {});
+    void load();
+    const timer = setInterval(load, 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [page, user?.role]);
+
   const filtered = quotes
     .filter(
       (q) =>
         (category === "All markets" || category === q.category) &&
         (!query ||
-          [q.symbol, q.name]
+          [q.symbol, q.instrumentId || "", q.name]
             .join(" ")
             .toLowerCase()
             .includes(query.toLowerCase())),
     )
     .sort((a, b) =>
       sort === "gainers"
-        ? b.change - a.change
+        ? (b.change ?? -Infinity) - (a.change ?? -Infinity)
         : sort === "losers"
-          ? a.change - b.change
+          ? (a.change ?? Infinity) - (b.change ?? Infinity)
           : sort === "volume"
-            ? b.volumeRatio - a.volumeRatio
+            ? (b.volumeRatio ?? -Infinity) - (a.volumeRatio ?? -Infinity)
             : 0,
     );
+  const embeddedOptions = marketDirectory(
+    [],
+    category,
+    query,
+    !broaderDiscovery,
+  );
+  const activeEmbedSymbol = embeddedOptions.some(
+    (i) => i.symbol === embedSymbol,
+  )
+    ? embedSymbol
+    : embeddedOptions[0]?.symbol;
+  const directoryQuotes = filtered;
   const trialDays = user
     ? Math.max(
         0,
@@ -381,13 +660,15 @@ export function Terminal({ page }: { page: string }) {
   function Brand() {
     return (
       <Link href="/" className="brand">
-        <span className="brand-mark">
-          <Activity size={23} />
-        </span>
-        <span>
-          DARK<span className="muted">MARKETS</span>
-          <small>POWERED BY DARK SYSTEMS</small>
-        </span>
+        <Image
+          className="brand-logo"
+          src="/dark-markets-logo.png"
+          alt="DARK MARKETS — Global Market Intelligence"
+          width={1280}
+          height={1254}
+          sizes="(max-width: 720px) 84px, 168px"
+          priority
+        />
       </Link>
     );
   }
@@ -423,6 +704,41 @@ export function Terminal({ page }: { page: string }) {
               {f.symbol} · {f.timestamp} · {f.source} · {f.status}
             </p>
           ))}
+          {report.content.calculations.map((f) => (
+            <p key={f.symbol + "-history"}>
+              {f.symbol}: sample return {fmt(f.historicalReturn ?? null)}% ·
+              volatility {fmt(f.volatility ?? null)}% · volume{" "}
+              {fmt(f.volume ?? null)}
+            </p>
+          ))}
+          {report.content.correlations?.map((c) => (
+            <p key={c.left + c.right}>
+              {c.left} / {c.right} correlation:{" "}
+              {c.value?.toFixed(4) ?? "Unavailable"} · {c.method}
+            </p>
+          ))}
+          {report.content.limitations?.map((l) => (
+            <p key={l}>{l}</p>
+          ))}
+          {report.content.evidence?.news && (
+            <p>News evidence: {report.content.evidence.news.status}</p>
+          )}
+          {report.content.evidence?.news?.items.map((n) => (
+            <p key={n.id}>
+              <a href={n.url}>{n.title}</a> · {n.source}{" "}
+              {n.aiGenerated ? "· AI-written, uncorroborated" : ""} ·{" "}
+              {n.publishedAt}
+            </p>
+          ))}
+          {report.content.evidence?.calendar && (
+            <p>Calendar evidence: {report.content.evidence.calendar.status}</p>
+          )}
+          {report.content.evidence?.calendar?.items.map((e) => (
+            <p key={e.id}>
+              <a href={e.url}>{e.title}</a> · {e.source} · {e.date} {e.time} UTC
+              · actual {e.actual ?? "Pending"}
+            </p>
+          ))}
           <p>{report.content.disclosure}</p>
         </details>
         <footer>
@@ -442,21 +758,53 @@ export function Terminal({ page }: { page: string }) {
     );
   }
   function MarketTable() {
+    if (page === "dashboard")
+      return (
+        <>
+          {user?.access && (
+            <ExternalQuotes items={embeddedOptions} enabled={embedEnabled} />
+          )}
+          <MarketDirectory
+            quotes={quotes}
+            fxReferences={user?.role === "ADMIN" ? fxReferences : []}
+            indexReferences={user?.role === "ADMIN" ? indexReferences : []}
+            stockReferences={user?.role === "ADMIN" ? stockReferences : []}
+            commodityReferences={
+              user?.role === "ADMIN" ? commodityReferences : []
+            }
+            spotReferences={user?.access ? spotReferences : []}
+            category={category}
+            query={query}
+            featured={!broaderDiscovery}
+            sort={sort}
+            watch={watch}
+            onWatch={toggleWatch}
+            onNativeChart={(quote) => {
+              setSelected(quote.symbol);
+              setModal("chart");
+            }}
+            onVisualChart={openVisualChart}
+            price={fmt}
+            change={(quote) => <Delta value={quote.change} />}
+            trend={(quote) => <Spark q={quote} />}
+          />
+        </>
+      );
     return (
       <div className="table-scroll">
         <table>
           <thead>
             <tr>
               <th>Asset</th>
-              <th>Price / USD quote</th>
-              <th>Fixture change</th>
+              <th>Price / quote currency</th>
+              <th>24h / fixture change</th>
               <th className="hide-mobile">3-day trend</th>
-              <th className="hide-mobile">Volume · demo</th>
+              <th className="hide-mobile">Base volume</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {filtered
+            {directoryQuotes
               .filter((a) => page !== "watchlist" || watch.includes(a.symbol))
               .map((a) => (
                 <tr
@@ -481,7 +829,14 @@ export function Terminal({ page }: { page: string }) {
                       <span>
                         <strong>{a.name}</strong>
                         <small>
-                          {a.symbol} <i>·</i> {a.category}
+                          {a.symbol} <i>·</i> {a.quoteCurrency || "USD"}{" "}
+                          <i>·</i> {a.status}
+                          <span
+                            title={`${a.source} · ${a.asOf} · ${a.latencyMs ?? 0}ms`}
+                          >
+                            {" "}
+                            · {a.exchange || a.source}
+                          </span>
                         </small>
                       </span>
                     </button>
@@ -494,7 +849,9 @@ export function Terminal({ page }: { page: string }) {
                     <Spark q={a} />
                   </td>
                   <td className="hide-mobile muted number">
-                    {(a.volume / 1e9).toFixed(2)}B
+                    {a.volume === null
+                      ? "Unavailable"
+                      : (a.volume / 1e9).toFixed(2) + "B"}
                   </td>
                   <td>
                     <button
@@ -520,23 +877,63 @@ export function Terminal({ page }: { page: string }) {
               ))}
           </tbody>
         </table>
-        {!filtered.filter(
+        {!directoryQuotes.filter(
           (a) => page !== "watchlist" || watch.includes(a.symbol),
-        ).length && (
-          <div className="empty">
-            {category === "CFDs"
-              ? "CFD data requires an authorised, licensed provider. No CFD feed is enabled."
-              : page === "watchlist"
+        ).length &&
+          !(page === "markets" && embeddedOptions.length) && (
+            <div className="empty">
+              {page === "watchlist"
                 ? "Your watchlist is clear. Star an asset in Markets to add it."
                 : "No matching assets."}
-          </div>
-        )}
+            </div>
+          )}
       </div>
     );
   }
   function Chart() {
-    const points = q.history.slice(
-      period === "1D" ? -24 : period === "2D" ? -48 : 0,
+    if (!q)
+      return (
+        <div className="empty">
+          Native quote unavailable. No synthetic price or history is
+          substituted.
+        </div>
+      );
+    const history =
+      q.status === "demonstration"
+        ? q.history
+        : chartData?.key === selected + ":" + timeframe
+          ? (chartData.candles || []).flatMap(
+              (c: any, index: number, rows: any[]) => {
+                const step = (
+                  {
+                    "1m": 60000,
+                    "5m": 300000,
+                    "15m": 900000,
+                    "1h": 3600000,
+                    "1d": 86400000,
+                  } as Record<string, number>
+                )[timeframe];
+                const point = { time: c.time, price: c.close };
+                return index > 0 &&
+                  Date.parse(c.time) - Date.parse(rows[index - 1].time) > step
+                  ? [
+                      {
+                        time: new Date(
+                          Date.parse(rows[index - 1].time) + step,
+                        ).toISOString(),
+                        price: null,
+                      },
+                      point,
+                    ]
+                  : [point];
+              },
+            )
+          : [];
+    const end = history.length ? Date.parse(history.at(-1)!.time) : 0;
+    const days =
+      period === "1D" ? 1 : period === "2D" ? 2 : period === "1M" ? 30 : 3;
+    const points = history.filter(
+      (p: any) => Date.parse(p.time) >= end - days * 86400000,
     );
     return (
       <>
@@ -547,11 +944,14 @@ export function Terminal({ page }: { page: string }) {
             </span>
             <div>
               <h3>
-                {q.name} <span className="muted">/ USD</span>
+                {q.name}{" "}
+                <span className="muted">/ {q.quoteCurrency || "USD"}</span>
               </h3>
               <small>
                 {q.symbol} ·{" "}
-                {q.source.includes("synthetic") ? "Demonstration" : q.source}
+                {q.source.includes("synthetic")
+                  ? "Demonstration"
+                  : `${q.source} · ${q.instrumentId} · ${q.status} · ${q.asOf} · ${q.latencyMs}ms`}
               </small>
             </div>
             <select
@@ -575,11 +975,13 @@ export function Terminal({ page }: { page: string }) {
         <div className="chart-values">
           <strong>{fmt(q.price)}</strong>
           <Delta value={q.change} />
-          <span className="muted">fixture change</span>
+          <span className="muted">
+            {q.status === "demonstration" ? "fixture change" : "24h change"}
+          </span>
         </div>
         <div className="chart-controls">
           <div className="segmented">
-            {["1D", "2D", "3D"].map((p) => (
+            {["1D", "2D", "3D", "1M"].map((p) => (
               <button
                 key={p}
                 className={period === p ? "active" : ""}
@@ -590,9 +992,57 @@ export function Terminal({ page }: { page: string }) {
             ))}
           </div>
           <span className="muted">
-            Area chart <Activity size={13} />
+            <select
+              aria-label="Candle timeframe"
+              value={timeframe}
+              onChange={(e) => setTimeframe(e.target.value)}
+            >
+              <option value="1m">1 min</option>
+              <option value="5m">5 min</option>
+              <option value="15m">15 min</option>
+              <option value="1h">1 hour</option>
+              <option value="1d">1 day</option>
+            </select>
           </span>
         </div>
+        {chartLoading && (
+          <p role="status" className="panel-footnote">
+            Loading actual historical candles…
+          </p>
+        )}
+        {chartError && (
+          <p role="status" className="notice">
+            {chartError}
+          </p>
+        )}
+        {chartData && (
+          <p className="panel-footnote">
+            History: {chartData.source} · {chartData.timeframe} ·{" "}
+            {chartData.exchangeTimezone} · {chartData.candles.length} completed
+            candles. {history.filter((p: any) => p.price === null).length} gaps
+            shown as breaks; no missing prices are filled. Collected{" "}
+            {chartData.collectedAt || chartData.asOf}.{" "}
+            {chartData.stale ? "STALE HISTORICAL CACHE. " : ""}
+            {chartData.warning || ""}
+          </p>
+        )}
+        {q.unit && (
+          <p className="panel-footnote">
+            {q.unit} · {q.kind} · session {q.session} · bid {fmt(q.bid ?? null)}{" "}
+            / ask {fmt(q.ask ?? null)}
+          </p>
+        )}
+        {q.calendar && (
+          <p className="panel-footnote">
+            Exchange calendar:{" "}
+            {q.calendar.schedules
+              .map(
+                (s) =>
+                  `${s.name}/${s.code} ${s.time_zone}: ${s.sessions.length ? s.sessions.map((x) => x.open_time + "–" + x.close_time + " " + x.session_name).join(", ") : "no scheduled sessions returned"}`,
+              )
+              .join("; ")}
+          </p>
+        )}
         <div className="main-chart">
           <ResponsiveContainer width="100%" height={270}>
             <AreaChart
@@ -601,13 +1051,13 @@ export function Terminal({ page }: { page: string }) {
             >
               <defs>
                 <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#b4f45b" stopOpacity={0.22} />
-                  <stop offset="100%" stopColor="#b4f45b" stopOpacity={0} />
+                  <stop offset="0%" stopColor="#5bb4f4" stopOpacity={0.22} />
+                  <stop offset="100%" stopColor="#5bb4f4" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid
                 vertical={false}
-                stroke="#272c28"
+                stroke="#272a2c"
                 strokeDasharray="3 5"
               />
               <XAxis
@@ -622,7 +1072,7 @@ export function Terminal({ page }: { page: string }) {
                 minTickGap={60}
                 axisLine={false}
                 tickLine={false}
-                tick={{ fill: "#778079", fontSize: 10 }}
+                tick={{ fill: "#777c80", fontSize: 10 }}
               />
               <YAxis
                 orientation="right"
@@ -631,12 +1081,12 @@ export function Terminal({ page }: { page: string }) {
                 axisLine={false}
                 tickLine={false}
                 width={78}
-                tick={{ fill: "#778079", fontSize: 10 }}
+                tick={{ fill: "#777c80", fontSize: 10 }}
               />
               <Tooltip
                 contentStyle={{
-                  background: "#151a16",
-                  border: "1px solid #35402f",
+                  background: "#15181a",
+                  border: "1px solid #2f3940",
                   borderRadius: 8,
                   color: "#fff",
                 }}
@@ -646,9 +1096,10 @@ export function Terminal({ page }: { page: string }) {
               <Area
                 type="monotone"
                 dataKey="price"
-                stroke="#b4f45b"
+                stroke="#5bb4f4"
                 strokeWidth={2}
                 fill="url(#chartFill)"
+                connectNulls={false}
                 isAnimationActive={false}
               />
             </AreaChart>
@@ -659,12 +1110,21 @@ export function Terminal({ page }: { page: string }) {
             SMA 14 <b>{fmt(q.sma)}</b>
           </span>
           <span>
-            RSI 14 <b>{q.rsi.toFixed(2)}</b>
+            RSI 14 <b>{q.rsi?.toFixed(2) ?? "Unavailable"}</b>
           </span>
           <span>
-            Volatility <b>{q.volatility.toFixed(2)}%</b> · Volume ratio{" "}
-            <b>{q.volumeRatio.toFixed(2)}×</b>
+            Volatility{" "}
+            <b>
+              {q.volatility === null
+                ? "Unavailable"
+                : q.volatility.toFixed(2) + "%"}
+            </b>{" "}
+            · Volume ratio <b>{q.volumeRatio?.toFixed(2) ?? "Unavailable"}×</b>
           </span>
+          {q.warning && <span role="status">{q.warning}</span>}
+          {q.history.length === 0 && (
+            <span>No historical candles available from this source.</span>
+          )}
           <span>
             Data: {new Date(q.asOf).toLocaleDateString("en-GB")} · UTC
           </span>
@@ -704,36 +1164,12 @@ export function Terminal({ page }: { page: string }) {
   }
   function CalendarPanel() {
     return (
-      <>
-        <div className="panel-heading">
-          <h3>
-            <CalendarDays size={16} /> On the calendar
-          </h3>
-          <Link href="/calendar">
-            <ArrowUpRight size={14} />
-          </Link>
-        </div>
-        <div className="subtle-banner">
-          {calendarStatus === "demonstration"
-            ? "Sample events · UTC · not an actual schedule"
-            : "Authorised provider schedule · UTC"}
-        </div>
-        {events.slice(0, 3).map((e) => (
-          <div key={e.id} className="event">
-            <span className="number muted">
-              {e.time}
-              <small>{e.date}</small>
-            </span>
-            <span>
-              <b>{e.region}</b>
-              <p>{e.title}</p>
-            </span>
-            <span className={"impact " + e.impact.toLowerCase()}>
-              {e.impact}
-            </span>
-          </div>
-        ))}
-      </>
+      <DashboardCalendarBrief
+        events={user?.access ? events : []}
+        news={user?.access ? news : []}
+        calendarStatus={calendarStatus}
+        newsStatus={newsStatus}
+      />
     );
   }
   const authPage = [
@@ -806,9 +1242,20 @@ export function Terminal({ page }: { page: string }) {
                 <Settings size={17} /> Account & billing
               </Link>
               {user?.role === "ADMIN" && (
-                <Link href="/admin">
-                  <ShieldCheck size={17} /> Administration
-                </Link>
+                <>
+                  <button
+                    className="button secondary"
+                    onClick={() => setAdminView(!adminView)}
+                    aria-pressed={adminView}
+                  >
+                    {adminView ? "Switch to user view" : "Switch to admin view"}
+                  </button>
+                  {adminView && (
+                    <Link href="/admin">
+                      <ShieldCheck size={17} /> Administration
+                    </Link>
+                  )}
+                </>
               )}
               <div className="profile">
                 <span className="avatar">
@@ -844,7 +1291,11 @@ export function Terminal({ page }: { page: string }) {
             </div>
           </aside>
           <div className="main-shell">
-            <header className="topbar">
+            <header
+              className={
+                page === "calendar" ? "topbar calendar-topbar" : "topbar"
+              }
+            >
               <button
                 className="icon-button mobile-menu"
                 aria-label="Toggle navigation"
@@ -876,9 +1327,15 @@ export function Terminal({ page }: { page: string }) {
                 </div>
                 <span className="demo-tag">
                   <span className="status-dot" />{" "}
-                  {quotes.some((a) => a.status === "demonstration")
-                    ? "DEMO DATA"
-                    : "PROVIDER DATA"}
+                  {!quotes.length
+                    ? "NATIVE DATA UNAVAILABLE"
+                    : quotes.some((a) => a.status === "demonstration")
+                      ? quotes.some((a) => a.status !== "demonstration")
+                        ? "MIXED · DEMO + PROVIDER"
+                        : "DEMO DATA"
+                      : quotes.some((a) => a.status === "stale")
+                        ? "STALE DATA"
+                        : "PROVIDER DATA"}
                 </span>
                 <button
                   className="icon-button notification-button"
@@ -890,23 +1347,16 @@ export function Terminal({ page }: { page: string }) {
                 </button>
               </div>
             </header>
-            <div className="ticker">
-              {quotes.slice(0, 7).map((a) => (
-                <button
-                  key={a.symbol}
-                  onClick={() => {
-                    setSelected(a.symbol);
-                    setModal("chart");
-                  }}
-                >
-                  <strong>{a.symbol}</strong>
-                  <span>{fmt(a.price)}</span>
-                  <Delta value={a.change} />
-                </button>
-              ))}
-            </div>
+            <MarketTicker
+              onVisualChart={openVisualChart}
+              quotes={user?.access ? quotes : []}
+              spots={user?.access ? spotReferences : []}
+              onChart={(quote) => {
+                setSelected(quote.symbol);
+                setModal("chart");
+              }}
+            />
             <main className="terminal-main">
-              {feedError && <div className="notice">{feedError}</div>}
               <div className="page-heading">
                 <div>
                   <div className="eyebrow">
@@ -922,15 +1372,21 @@ export function Terminal({ page }: { page: string }) {
                   <p>
                     {page === "dashboard"
                       ? "Every asset. Every perspective. One connected view."
-                      : "Explore the information behind every market."}
+                      : page === "workspace"
+                        ? "Your markets, chart timeframes and private trading notes."
+                        : "Explore the information behind every market."}
                   </p>
                 </div>
                 <div className="heading-actions">
                   <span className="date-label">
-                    {new Date(q.asOf)
+                    {new Date(q?.asOf || Date.now())
                       .toLocaleDateString("en-GB", { timeZone: "UTC" })
                       .toUpperCase()}{" "}
-                    <small>{q.status.toUpperCase()} SNAPSHOT</small>
+                    <small>
+                      {q
+                        ? q.status.toUpperCase() + " SNAPSHOT"
+                        : "NATIVE DATA UNAVAILABLE"}
+                    </small>
                   </span>
                   {page === "dashboard" && (
                     <button
@@ -987,124 +1443,170 @@ export function Terminal({ page }: { page: string }) {
               )}
               {page === "dashboard" && (
                 <>
-                  <div className="stat-grid">
-                    {["SPX", "BTC", "XAU", "EURUSD"].map((symbol) => {
-                      const a =
-                        quotes.find((q) => q.symbol === symbol) || quotes[0];
-                      return (
-                        <button
-                          className="stat-card"
-                          key={symbol}
-                          onClick={() => {
-                            setSelected(symbol);
-                            setModal("chart");
-                          }}
-                        >
-                          <div>
-                            <span className="stat-label">{a.name}</span>
-                            <span className="mini-icon">
-                              <Globe2 size={15} />
-                            </span>
-                          </div>
-                          <strong>{fmt(a.price)}</strong>
-                          <div>
-                            <Delta value={a.change} />
-                            <small>{a.category}</small>
-                          </div>
-                          <div className="stat-spark">
-                            <Spark q={a} />
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="dashboard-grid">
-                    {widgets.map((widget) => (
-                      <section
-                        key={widget}
-                        className={"panel widget-" + widget}
-                        draggable={!!user?.premium}
-                        onDragStart={() => setDrag(widget)}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={() => {
-                          if (user?.premium && drag !== widget) {
-                            const next = [...widgets];
-                            next.splice(next.indexOf(drag), 1);
-                            next.splice(next.indexOf(widget), 0, drag);
-                            saveWidgets(next);
-                          }
-                        }}
+                  <MarketTicker
+                    onVisualChart={openVisualChart}
+                    variant="cards"
+                    quotes={user?.access ? quotes : []}
+                    spots={user?.access ? spotReferences : []}
+                    trend={(quote) => <Spark q={quote} />}
+                    onChart={(quote) => {
+                      setSelected(quote.symbol);
+                      setModal("chart");
+                    }}
+                  />
+                  <div className="dashboard-grid dashboard-columns">
+                    {(["main", "side"] as const).map((column) => (
+                      <div
+                        key={column}
+                        className={"dashboard-" + column + "-column"}
                       >
-                        {widget === "chart" ? (
-                          <Chart />
-                        ) : widget === "markets" ? (
-                          <>
-                            <div className="panel-heading">
-                              <h3>
-                                Market overview{" "}
-                                <span className="count">{filtered.length}</span>
-                              </h3>
-                              <Link href="/markets">
-                                All assets <ArrowUpRight size={13} />
-                              </Link>
-                            </div>
-                            <div className="category-tabs">
-                              {categories.slice(0, 6).map((c) => (
-                                <button
-                                  key={c}
-                                  className={category === c ? "active" : ""}
-                                  onClick={() => setCategory(c)}
-                                >
-                                  {c === "All markets" ? "All assets" : c}
-                                </button>
-                              ))}
-                            </div>
-                            <MarketTable />
-                          </>
-                        ) : widget === "news" ? (
-                          <NewsPanel />
-                        ) : widget === "calendar" ? (
-                          <CalendarPanel />
-                        ) : (
-                          <>
-                            <div className="panel-heading">
-                              <h3>
-                                <Sparkles size={16} /> The intelligence brief
-                              </h3>
-                              <span className="tiny-badge">RESEARCH</span>
-                            </div>
-                            <div className="intelligence-preview">
-                              <div className="ai-orb">
-                                <Sparkles size={25} />
-                              </div>
-                              <div className="eyebrow">
-                                LESS NOISE. MORE CONTEXT.
-                              </div>
-                              <h2>
-                                A clearer view of
-                                <br />
-                                the bigger picture.
-                              </h2>
-                              <p>
-                                Evidence-led market briefings. Deterministic
-                                numbers. Transparent sources.
-                              </p>
-                              <Link
-                                className="button primary"
-                                href="/intelligence"
-                              >
-                                Open intelligence <ArrowUpRight size={15} />
-                              </Link>
-                              <small>
-                                Information, never personalised advice.
-                              </small>
-                            </div>
-                          </>
-                        )}
-                      </section>
+                        {widgets
+                          .filter((widget) =>
+                            column === "main"
+                              ? ["chart", "markets"].includes(widget)
+                              : !["chart", "markets"].includes(widget),
+                          )
+                          .map((widget) => (
+                            <section
+                              key={widget}
+                              className={"panel widget-" + widget}
+                              draggable={!!user?.premium}
+                              onDragStart={() => setDrag(widget)}
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={() => {
+                                if (user?.premium && drag !== widget) {
+                                  const next = [...widgets];
+                                  next.splice(next.indexOf(drag), 1);
+                                  next.splice(next.indexOf(widget), 0, drag);
+                                  saveWidgets(next);
+                                }
+                              }}
+                            >
+                              {widget === "chart" ? (
+                                <Chart />
+                              ) : widget === "markets" ? (
+                                <>
+                                  <div className="panel-heading">
+                                    <h3>
+                                      Market overview{" "}
+                                      <span className="count">
+                                        {
+                                          marketDirectory(
+                                            quotes,
+                                            category,
+                                            query,
+                                            !broaderDiscovery,
+                                          ).length
+                                        }
+                                      </span>
+                                    </h3>
+                                    <Link href="/markets">
+                                      All assets <ArrowUpRight size={13} />
+                                    </Link>
+                                  </div>
+                                  <div className="category-tabs">
+                                    {categories.map((c) => (
+                                      <button
+                                        key={c}
+                                        className={
+                                          category === c ? "active" : ""
+                                        }
+                                        onClick={() => setCategory(c)}
+                                      >
+                                        {c === "All markets" ? "All assets" : c}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <div
+                                    key={category}
+                                    className="dashboard-markets-scroll"
+                                    role="region"
+                                    aria-label="Scrollable market overview"
+                                    tabIndex={0}
+                                  >
+                                    {MarketTable()}
+                                  </div>
+                                </>
+                              ) : widget === "news" ? (
+                                <NewsPanel />
+                              ) : widget === "calendar" ? (
+                                <CalendarPanel />
+                              ) : (
+                                <>
+                                  <div className="panel-heading">
+                                    <h3>
+                                      <Sparkles size={16} /> The intelligence
+                                      brief
+                                    </h3>
+                                    <span className="tiny-badge">RESEARCH</span>
+                                  </div>
+                                  <div className="intelligence-preview">
+                                    <div className="ai-orb">
+                                      <Sparkles size={25} />
+                                    </div>
+                                    <div className="eyebrow">
+                                      LESS NOISE. MORE CONTEXT.
+                                    </div>
+                                    <h2>
+                                      A clearer view of
+                                      <br />
+                                      the bigger picture.
+                                    </h2>
+                                    <p>
+                                      Evidence-led market briefings.
+                                      Deterministic numbers. Transparent
+                                      sources.
+                                    </p>
+                                    <Link
+                                      className="button primary"
+                                      href="/intelligence"
+                                    >
+                                      Open intelligence{" "}
+                                      <ArrowUpRight size={15} />
+                                    </Link>
+                                    <small>
+                                      Information, never personalised advice.
+                                    </small>
+                                  </div>
+                                </>
+                              )}
+                            </section>
+                          ))}
+                      </div>
                     ))}
                   </div>
                 </>
+              )}
+              {page === "markets" && user?.role === "ADMIN" && adminView && (
+                <MarketDataEvaluation />
+              )}
+              {page === "workspace" && user && (
+                <MyWorkspace
+                  onVisualChart={openVisualChart}
+                  premium={user.premium}
+                  articles={user.premium ? news : []}
+                  events={user.premium ? events : []}
+                  newsStatus={newsStatus}
+                  calendarStatus={calendarStatus}
+                  quotes={user.access ? quotes : []}
+                  spotReferences={user.access ? spotReferences : []}
+                  fxReferences={user.role === "ADMIN" ? fxReferences : []}
+                  commodityReferences={
+                    user.role === "ADMIN" ? commodityReferences : []
+                  }
+                  stockReferences={user.role === "ADMIN" ? stockReferences : []}
+                  indexReferences={user.role === "ADMIN" ? indexReferences : []}
+                  watch={watch}
+                  onWatch={toggleWatch}
+                  price={(value) => fmt(value)}
+                  change={(quote) => <Delta value={quote.change} />}
+                  trend={(quote) => <Spark q={quote} />}
+                  onNativeChart={(quote, frame) => {
+                    setSelected(quote.symbol);
+                    setTimeframe(frame);
+                    setModal("chart");
+                  }}
+                />
               )}
               {["markets", "watchlist"].includes(page) && (
                 <section className="panel">
@@ -1150,8 +1652,238 @@ export function Terminal({ page }: { page: string }) {
                       </button>
                     ))}
                   </div>
-                  <MarketTable />
+                  {page === "markets" && user?.access && (
+                    <ExternalQuotes
+                      items={embeddedOptions}
+                      enabled={embedEnabled}
+                    />
+                  )}
+                  {page === "markets" ? (
+                    <MarketDirectory
+                      onWorkspaceAdd={user ? addWorkspaceInstrument : undefined}
+                      workspaceIds={workspaceIds}
+                      workspaceBusyId={workspaceBusyId}
+                      quotes={quotes}
+                      fxReferences={user?.role === "ADMIN" ? fxReferences : []}
+                      indexReferences={
+                        user?.role === "ADMIN" ? indexReferences : []
+                      }
+                      stockReferences={
+                        user?.role === "ADMIN" ? stockReferences : []
+                      }
+                      commodityReferences={
+                        user?.role === "ADMIN" ? commodityReferences : []
+                      }
+                      spotReferences={user?.access ? spotReferences : []}
+                      category={category}
+                      query={query}
+                      featured={!broaderDiscovery}
+                      sort={sort}
+                      watch={watch}
+                      onWatch={toggleWatch}
+                      onNativeChart={(quote) => {
+                        setSelected(quote.symbol);
+                        setModal("chart");
+                      }}
+                      onVisualChart={openVisualChart}
+                      price={(value) => fmt(value)}
+                      change={(quote) => <Delta value={quote.change} />}
+                      trend={(quote) => <Spark q={quote} />}
+                    />
+                  ) : (
+                    <MarketTable />
+                  )}
                 </section>
+              )}
+              {page === "markets" && user?.access && (
+                <>
+                  <div id="global-market-chart">
+                    <div className="market-sort">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={broaderDiscovery}
+                          onChange={(e) =>
+                            setBroaderDiscovery(e.target.checked)
+                          }
+                        />{" "}
+                        Broader visual discovery beyond the 40 core instruments
+                      </label>
+                      {activeEmbedSymbol ? (
+                        <select
+                          aria-label="Embedded chart instrument"
+                          value={activeEmbedSymbol}
+                          onChange={(e) => setEmbedSymbol(e.target.value)}
+                        >
+                          {embeddedOptions.map((i) => (
+                            <option key={i.symbol} value={i.symbol}>
+                              {i.category} · {i.name} · {i.symbol} · {i.kind}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p>
+                          No matching global charts.{" "}
+                          {category === "Crypto"
+                            ? "Select a crypto asset above to open its native chart."
+                            : "Try another search or section."}
+                        </p>
+                      )}
+                    </div>
+                    {activeEmbedSymbol && (
+                      <ExternalChart
+                        allowSymbolChange={broaderDiscovery}
+                        symbol={activeEmbedSymbol}
+                        enabled={embedEnabled}
+                      />
+                    )}
+                  </div>
+                  <section
+                    className="panel form-panel"
+                    aria-label="Selected market information"
+                  >
+                    <h2>{category} information</h2>
+                    <p>
+                      {marketGroupInformation[category] ||
+                        marketGroupInformation["All markets"]}
+                    </p>
+                  </section>
+                  {category === "Stocks" && (
+                    <section className="panel form-panel">
+                      <h2>SEC company fundamentals</h2>
+                      <select
+                        aria-label="SEC reporting period"
+                        value={fundamentalPeriod}
+                        onChange={(e) => setFundamentalPeriod(e.target.value)}
+                      >
+                        <option value="all">All reported periods</option>
+                        <option value="annual">
+                          Annual / year-end balances
+                        </option>
+                        <option value="quarter">
+                          Quarterly / quarter-end balances
+                        </option>
+                        <option value="duration">
+                          Other reported durations (including YTD)
+                        </option>
+                      </select>
+                      <select
+                        aria-label="SEC company"
+                        value={companySymbol}
+                        onChange={(e) => setCompanySymbol(e.target.value)}
+                      >
+                        {["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "TSLA"].map(
+                          (symbol) => (
+                            <option key={symbol}>{symbol}</option>
+                          ),
+                        )}
+                      </select>
+                      {fundamentalLoading ? (
+                        <p role="status">Loading cached SEC records…</p>
+                      ) : !fundamentals?.metrics ? (
+                        <p role="status">
+                          SEC fundamentals unavailable or not collected yet. No
+                          figures are invented.
+                        </p>
+                      ) : (
+                        <>
+                          <h3>
+                            {fundamentals.name} · CIK {fundamentals.cik}
+                          </h3>
+                          <p>
+                            Historical financial filings, not live prices.
+                            Checked {fundamentals.checkedAt} · Company-facts
+                            download {fundamentals.factsFetchedAt}{" "}
+                            {fundamentals.stale ? "· STALE COLLECTION" : ""}
+                          </p>
+                          {Object.entries(fundamentals.metrics).map(
+                            ([metric, rows]: [string, any]) => (
+                              <details key={metric}>
+                                <summary>
+                                  {metric} · {rows.length} reported observations
+                                </summary>
+                                {!rows.length ? (
+                                  <p>Concept unavailable in SEC data.</p>
+                                ) : (
+                                  rows
+                                    .filter(
+                                      (f: any) =>
+                                        fundamentalPeriod === "all" ||
+                                        periodKind(f) === fundamentalPeriod ||
+                                        (fundamentalPeriod === "duration" &&
+                                          periodKind(f).startsWith(
+                                            "reported duration",
+                                          )) ||
+                                        (periodKind(f) === "instant" &&
+                                          (fundamentalPeriod === "annual"
+                                            ? f.form.startsWith("10-K")
+                                            : fundamentalPeriod === "quarter" &&
+                                              f.form.startsWith("10-Q"))),
+                                    )
+                                    .slice(0, 24)
+                                    .map((f: any) => (
+                                      <p
+                                        key={[
+                                          f.concept,
+                                          f.unit,
+                                          f.start,
+                                          f.end,
+                                          f.accession,
+                                          f.frame,
+                                        ].join(":")}
+                                      >
+                                        <strong>
+                                          {f.value.toLocaleString("en-US")}{" "}
+                                          {f.unit}
+                                        </strong>{" "}
+                                        · {f.taxonomy}:{f.concept} ·{" "}
+                                        {f.start || "Instant"} → {f.end} ·{" "}
+                                        {periodKind(f)} · FY {f.fiscalYear}{" "}
+                                        {f.fiscalPeriod} · filed {f.filed} ·{" "}
+                                        <a
+                                          href={f.sourceUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                        >
+                                          {f.form} / {f.accession}
+                                        </a>
+                                      </p>
+                                    ))
+                                )}
+                              </details>
+                            ),
+                          )}
+                          <details>
+                            <summary>Original SEC filings</summary>
+                            {fundamentals.filings
+                              ?.slice(0, 12)
+                              .map((f: any) => (
+                                <p key={f.accession}>
+                                  <a
+                                    href={f.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    {f.form} · {f.filed} · {f.accession}
+                                  </a>
+                                </p>
+                              ))}
+                          </details>
+                          {fundamentals.limitations?.map((line: string) => (
+                            <p key={line}>{line}</p>
+                          ))}
+                          <a
+                            href={fundamentals.sourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            Source: SEC EDGAR company facts
+                          </a>
+                        </>
+                      )}
+                    </section>
+                  )}
+                </>
               )}
               {page === "intelligence" && (
                 <>
@@ -1270,6 +2002,13 @@ export function Terminal({ page }: { page: string }) {
                           </div>
                           <h2>{n.title}</h2>
                           <p>{n.summary}</p>
+                          {n.aiGenerated && (
+                            <p className="notice">
+                              AI-written by the upstream newswire; not
+                              independently corroborated. Verify consequential
+                              claims against original filings/sources.
+                            </p>
+                          )}
                           <div className="tags">
                             {n.symbols.map((s) => (
                               <button
@@ -1284,7 +2023,13 @@ export function Terminal({ page }: { page: string }) {
                             ))}
                           </div>
                           <a href={n.url}>
-                            {n.source} <ExternalLink size={13} />
+                            {n.source}{" "}
+                            {n.aiGenerated
+                              ? "· AI-written, uncorroborated"
+                              : ""}{" "}
+                            · {new Date(n.publishedAt).toUTCString()}{" "}
+                            {n.breaking ? "· BREAKING" : ""}{" "}
+                            <ExternalLink size={13} />
                           </a>
                         </article>
                       ))}
@@ -1292,14 +2037,7 @@ export function Terminal({ page }: { page: string }) {
                 </>
               )}
               {page === "calendar" && (
-                <section className="panel">
-                  <CalendarPanel />
-                  <div className="panel-footnote">
-                    {calendarStatus === "demonstration"
-                      ? "These illustrative events are not an economic release schedule. Configure an authorised calendar provider for actual events."
-                      : "Release times are supplied by the configured calendar provider in UTC and may change."}
-                  </div>
-                </section>
+                <CalendarSchedule events={events} status={calendarStatus} />
               )}
               {page === "alerts" && (
                 <section className="panel">
@@ -1382,21 +2120,21 @@ export function Terminal({ page }: { page: string }) {
                       <div className="compare-chart">
                         <ResponsiveContainer width="100%" height={350}>
                           <LineChart data={compareData?.series || []}>
-                            <CartesianGrid stroke="#272c28" />
+                            <CartesianGrid stroke="#272a2c" />
                             <XAxis dataKey="time" hide />
                             <YAxis
                               tickFormatter={(v) => v.toFixed(1) + "%"}
-                              stroke="#89938b"
+                              stroke="#898f93"
                             />
                             <Tooltip
                               contentStyle={{
-                                background: "#171c18",
-                                borderColor: "#394234",
+                                background: "#171a1c",
+                                borderColor: "#343c42",
                               }}
                             />
                             <Line
                               dataKey={selected}
-                              stroke="#b4f45b"
+                              stroke="#5bb4f4"
                               dot={false}
                             />
                             <Line
@@ -1409,7 +2147,7 @@ export function Terminal({ page }: { page: string }) {
                       </div>
                       <div className="panel-footnote">
                         Normalised change from the first supplied observation.{" "}
-                        {selected} in lime; {compareSymbol} in purple.{" "}
+                        {selected} in blue; {compareSymbol} in purple.{" "}
                         {compareData?.indicators.map((i: any) => (
                           <p key={i.symbol}>
                             {i.symbol}: MACD {fmt(i.macd)} · Signal{" "}
@@ -1655,6 +2393,297 @@ export function Terminal({ page }: { page: string }) {
                           <small>{j.error}</small>
                         </div>
                       ))}
+                      <h2>Provider monitoring</h2>
+                      {!providerHealth ? (
+                        <p>Engine monitoring unavailable.</p>
+                      ) : (
+                        <>
+                          <p>
+                            Engine {providerHealth.pid} ·{" "}
+                            {Math.round(providerHealth.uptimeSeconds)}s uptime ·{" "}
+                            {(providerHealth.memory.rss / 1048576).toFixed(1)}{" "}
+                            MiB RSS · stream {providerHealth.stream} ·{" "}
+                            {providerHealth.subscribers} consumers
+                          </p>
+                          <p>
+                            Cache hits {providerHealth.metrics.cacheHits} ·
+                            fallbacks {providerHealth.metrics.failovers} ·
+                            recoveries {providerHealth.metrics.recoveries} ·
+                            coverage{" "}
+                            {
+                              providerHealth.coverage.filter(
+                                (i: any) => i.selectedProvider,
+                              ).length
+                            }
+                            /{providerHealth.coverage.length}
+                          </p>
+                          {providerHealth.reliability && (
+                            <>
+                              <p>
+                                Quote freshness:{" "}
+                                {providerHealth.reliability.percentage.toFixed(
+                                  2,
+                                )}
+                                % · {providerHealth.reliability.fresh}/
+                                {providerHealth.reliability.eligible} eligible
+                                crypto pairs within{" "}
+                                {providerHealth.reliability.thresholdMs / 1000}s
+                                (current snapshot).
+                              </p>
+                              <p>
+                                Worker{" "}
+                                {providerHealth.worker?.healthy
+                                  ? "healthy"
+                                  : "unhealthy"}{" "}
+                                · PID{" "}
+                                {providerHealth.worker?.pid || "unavailable"} ·
+                                heartbeat{" "}
+                                {providerHealth.worker?.heartbeatAt ||
+                                  "unavailable"}
+                                . Engine collection every{" "}
+                                {providerHealth.collectionIntervalSeconds}s.
+                              </p>
+                              <details>
+                                <summary>
+                                  Per-instrument source age and local processing
+                                  age
+                                </summary>
+                                {providerHealth.reliability.rows.map(
+                                  (r: any) => (
+                                    <p key={r.instrumentId}>
+                                      {r.instrumentId} ·{" "}
+                                      {r.provider || "unavailable"} ·{" "}
+                                      {r.fresh ? "fresh" : "stale / missing"} ·
+                                      source age{" "}
+                                      {r.sourceAgeMs === null
+                                        ? "unavailable"
+                                        : (r.sourceAgeMs / 1000).toFixed(1) +
+                                          "s"}{" "}
+                                      · receipt age{" "}
+                                      {r.receiptAgeMs === null
+                                        ? "unavailable"
+                                        : (r.receiptAgeMs / 1000).toFixed(1) +
+                                          "s"}{" "}
+                                      · timestamp{" "}
+                                      {r.timestampKind || "unavailable"}
+                                    </p>
+                                  ),
+                                )}
+                              </details>
+                              <details>
+                                <summary>
+                                  Source switching events · latest{" "}
+                                  {providerHealth.switches?.length || 0}
+                                </summary>
+                                {(providerHealth.switches || [])
+                                  .slice()
+                                  .reverse()
+                                  .map((e: any, index: number) => (
+                                    <p key={index}>
+                                      {e.at} · {e.instrumentId} · {e.from} →{" "}
+                                      {e.to} · {e.reason} · previous age{" "}
+                                      {e.oldAgeMs === null
+                                        ? "unavailable"
+                                        : (e.oldAgeMs / 1000).toFixed(1) + "s"}
+                                    </p>
+                                  ))}
+                              </details>
+                              <details>
+                                <summary>
+                                  Historical collection ·{" "}
+                                  {providerHealth.historyCollection
+                                    ?.collected || 0}{" "}
+                                  collected /{" "}
+                                  {providerHealth.historyCollection?.failed ||
+                                    0}{" "}
+                                  failed attempts ·{" "}
+                                  {providerHealth.historyCached} cached
+                                </summary>
+                                {(
+                                  providerHealth.historyCollection?.failures ||
+                                  []
+                                )
+                                  .slice()
+                                  .reverse()
+                                  .map((e: any, index: number) => (
+                                    <p key={index}>
+                                      {e.at} · {e.key} · {e.reason}
+                                    </p>
+                                  ))}
+                              </details>
+                            </>
+                          )}
+                          {providerHealth.sourceWarnings && (
+                            <details>
+                              <summary>
+                                Thin / old source timestamps ·{" "}
+                                {
+                                  Object.keys(providerHealth.sourceWarnings)
+                                    .length
+                                }
+                              </summary>
+                              {Object.entries(
+                                providerHealth.sourceWarnings,
+                              ).map(([key, value]: [string, any]) => (
+                                <p key={key}>
+                                  {key} · source age at rejection{" "}
+                                  {(value.ageMs / 1000).toFixed(1)}s · exchange
+                                  timestamp {value.asOf} · received{" "}
+                                  {value.receivedAt}. Receipt does not imply a
+                                  new trade.
+                                </p>
+                              ))}
+                            </details>
+                          )}
+                          {providerHealth.monitoring && (
+                            <details>
+                              <summary>
+                                Reliability runs and recorded interruptions
+                              </summary>
+                              <p>
+                                Original endurance:{" "}
+                                {providerHealth.monitoring.original?.status ||
+                                  "unavailable"}{" "}
+                                · historical freshness{" "}
+                                {(
+                                  (providerHealth.monitoring.original
+                                    ?.freshnessRatio || 0) * 100
+                                ).toFixed(2)}
+                                % · engine restarts{" "}
+                                {providerHealth.monitoring.original
+                                  ?.engineRestarts ?? "unavailable"}{" "}
+                                · worker restarts{" "}
+                                {providerHealth.monitoring.original
+                                  ?.workerRestarts ?? "unavailable"}
+                                . Maintenance and failures remain in its
+                                results.
+                              </p>
+                              <p>
+                                Active acceptance:{" "}
+                                {providerHealth.monitoring.directory || "none"}{" "}
+                                ·{" "}
+                                {providerHealth.monitoring.acceptance?.status ||
+                                  "not sampled"}{" "}
+                                · freshness{" "}
+                                {(
+                                  (providerHealth.monitoring.acceptance
+                                    ?.freshness || 0) * 100
+                                ).toFixed(2)}
+                                % ·{" "}
+                                {providerHealth.monitoring.acceptance
+                                  ?.eligibleObservations || 0}{" "}
+                                eligible observations · last sample{" "}
+                                {providerHealth.monitoring.acceptance
+                                  ?.lastSampleAt || "unavailable"}{" "}
+                                ·{" "}
+                                {providerHealth.monitoring.acceptance
+                                  ?.passed === true
+                                  ? "completed pass"
+                                  : "no completed pass"}
+                                .
+                              </p>
+                              <p>
+                                Worker job health:{" "}
+                                {providerHealth.worker?.tickHealthy === false
+                                  ? "unhealthy"
+                                  : "see heartbeat"}{" "}
+                                · last completed tick{" "}
+                                {providerHealth.worker?.lastTickCompletedAt ||
+                                  "unavailable"}{" "}
+                                · last error{" "}
+                                {providerHealth.worker?.lastError || "none"}.
+                              </p>
+                              {(
+                                providerHealth.monitoring.maintenance || []
+                              ).map((e: any, index: number) => (
+                                <p key={index}>
+                                  {e.at} · {(e.components || []).join(", ")} ·{" "}
+                                  {e.reason}
+                                </p>
+                              ))}
+                            </details>
+                          )}
+                          {Object.entries(providerHealth.providers).map(
+                            ([id, p]: [string, any]) => (
+                              <div className="list-row" key={id}>
+                                <strong>{id}</strong>
+                                <small>
+                                  {p.state} · {p.lastError || "no error"} ·{" "}
+                                  {p.latencyMs ?? "—"}ms · requests{" "}
+                                  {providerHealth.usage[id]?.requests} · quota
+                                  events {providerHealth.usage[id]?.rateLimits}
+                                </small>
+                              </div>
+                            ),
+                          )}
+                        </>
+                      )}
+                      <h2>
+                        Central source collection · $0/month API subscription
+                        target
+                      </h2>
+                      {collectionPanel && (
+                        <>
+                          <p>
+                            Markets:{" "}
+                            {providerHealth?.collectionIntervalSeconds || 15}{" "}
+                            seconds. News, calendar and filing checks: 60
+                            minutes. Page views read shared caches.
+                          </p>
+                          {Object.entries(collectionPanel.controls).map(
+                            ([id, enabled]) => (
+                              <div className="list-row" key={id}>
+                                <strong>{id}</strong>
+                                <small>
+                                  {[
+                                    "capitaldatawire",
+                                    "financecalendar",
+                                    "sec",
+                                  ].includes(id)
+                                    ? "Free source; terms/attribution reviewed"
+                                    : id === "tradingview"
+                                      ? "Embedded display only"
+                                      : "Commercial redistribution not approved by public API access"}
+                                </small>
+                                <button
+                                  className="button secondary"
+                                  onClick={async () => {
+                                    setCollectionPanel(
+                                      await api("data/providers", "POST", {
+                                        provider: id,
+                                        enabled: !enabled,
+                                      }),
+                                    );
+                                    notify(
+                                      "Source setting saved; collection controls apply on the next central cycle.",
+                                    );
+                                  }}
+                                >
+                                  {enabled ? "Deactivate" : "Activate"}
+                                </button>
+                              </div>
+                            ),
+                          )}
+                          {collectionPanel.collections.map((row: any) => (
+                            <details key={row.key}>
+                              <summary>
+                                {row.key} · {row.status} · {row.asOf}
+                              </summary>
+                              <p>{row.error || "No collection error"}</p>
+                              {row.details && (
+                                <pre
+                                  style={{
+                                    whiteSpace: "pre-wrap",
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {JSON.stringify(row.details, null, 2)}
+                                </pre>
+                              )}
+                            </details>
+                          ))}
+                        </>
+                      )}
                       <h2>Support requests</h2>
                       {admin.support.map((s: any) => (
                         <div className="list-row" key={s.id}>
@@ -1695,10 +2724,17 @@ export function Terminal({ page }: { page: string }) {
               <footer className="terminal-footer">
                 <span>
                   <span className="status-dot" />{" "}
-                  {quotes.some((a) => a.status === "demonstration")
-                    ? "Synthetic demonstration observations"
-                    : "Provider observations"}{" "}
-                  · {new Date(q.asOf).toUTCString()}
+                  {!quotes.length
+                    ? "Native observations unavailable"
+                    : quotes.some((a) => a.status === "demonstration")
+                      ? quotes.some((a) => a.status !== "demonstration")
+                        ? "Mixed provider and demonstration observations"
+                        : "Synthetic demonstration observations"
+                      : "Provider observations — check source timestamps"}{" "}
+                  ·{" "}
+                  {q
+                    ? new Date(q.asOf).toUTCString()
+                    : "Native quote unavailable"}
                 </span>
                 <span>
                   Information. Never personalised advice.{" "}
@@ -1782,7 +2818,9 @@ export function Terminal({ page }: { page: string }) {
                   const a = quotes.find((q) => q.symbol === s) || quotes[0];
                   return (
                     <div key={s}>
-                      <small>{a.name} · DEMO</small>
+                      <small>
+                        {a.name} · {a.status.toUpperCase()}
+                      </small>
                       <strong>{fmt(a.price)}</strong>
                       <Delta value={a.change} />
                     </div>
@@ -2011,7 +3049,11 @@ export function Terminal({ page }: { page: string }) {
                           },
                         );
                         notify(result.message || "Signed in");
-                        location.href = "/dashboard";
+                        location.href =
+                          new URLSearchParams(location.search).get("next") ===
+                          "/workspace"
+                            ? "/workspace"
+                            : "/dashboard";
                       });
                     }}
                   >
@@ -2220,7 +3262,8 @@ export function Terminal({ page }: { page: string }) {
             aria-modal="true"
             aria-label={modal}
             className={
-              "modal panel " + (modal === "chart" ? "chart-modal" : "")
+              "modal panel " +
+              (["chart", "visual-chart"].includes(modal) ? "chart-modal" : "")
             }
           >
             <button
@@ -2231,7 +3274,13 @@ export function Terminal({ page }: { page: string }) {
             >
               <X size={20} />
             </button>
-            {modal === "chart" ? (
+            {modal === "visual-chart" ? (
+              <ExternalChart
+                symbol={visualChart.symbol}
+                interval={visualChart.interval}
+                enabled={embedEnabled}
+              />
+            ) : modal === "chart" ? (
               <Chart />
             ) : modal === "alert" ? (
               <>

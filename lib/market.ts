@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { changePercent, indicator } from "./domain";
+import { engineFetch } from "./feeds/client";
+import { instruments, validate, type Observation } from "./feeds/types";
 export const assetList = [
   ["BTC", "Bitcoin", "Crypto", 67432.8, 2.84],
   ["ETH", "Ethereum", "Crypto", 3521.46, 1.92],
@@ -22,16 +24,34 @@ export type Quote = {
   name: string;
   category: string;
   price: number;
-  change: number;
-  volume: number;
-  volumeRatio: number;
-  volatility: number;
+  change: number | null;
+  volume: number | null;
+  volumeRatio: number | null;
+  volatility: number | null;
   history: { time: string; price: number }[];
-  sma: number;
-  rsi: number;
+  sma: number | null;
+  rsi: number | null;
   source: string;
   asOf: string;
-  status: "demonstration" | "delayed" | "realtime";
+  status: "demonstration" | "delayed" | "realtime" | "stale";
+  instrumentId?: string;
+  provider?: string;
+  providerSymbol?: string;
+  exchange?: string;
+  baseCurrency?: string;
+  quoteCurrency?: string;
+  latencyMs?: number;
+  receivedAt?: string;
+  timestampKind?: "exchange" | "receipt" | "fixture";
+  transport?: string;
+  warning?: string;
+  calendar?: Observation["calendar"];
+  unit?: string;
+  kind?: import("./feeds/types").Instrument["kind"];
+  bid?: number | null;
+  ask?: number | null;
+  candles?: import("./feeds/types").Candle[];
+  exportAllowed?: boolean;
   exchangeTimezone: string;
   session: string;
 };
@@ -65,6 +85,22 @@ export function demoQuotes(): Quote[] {
       volume: Math.round((idx + 1) * 139283042),
       volumeRatio: 1 + idx * 0.13,
       volatility: Math.abs(change) * 0.6,
+      instrumentId: instruments.find((i) => i.symbol === symbol)?.id || symbol,
+      baseCurrency:
+        symbol === "EURUSD"
+          ? "EUR"
+          : symbol === "GBPUSD"
+            ? "GBP"
+            : symbol === "USDJPY"
+              ? "USD"
+              : symbol,
+      quoteCurrency: symbol === "USDJPY" ? "JPY" : "USD",
+      provider: "demo",
+      exchange: "Synthetic fixture",
+      latencyMs: 0,
+      receivedAt: FIXTURE_TIME,
+      timestampKind: "fixture",
+      exportAllowed: true,
       source: "DARK MARKETS synthetic fixture v1",
       asOf: FIXTURE_TIME,
       status: "demonstration",
@@ -75,6 +111,63 @@ export function demoQuotes(): Quote[] {
       session: category === "Crypto" ? "24/7" : "Fixture — no live session",
     };
   });
+}
+
+export function observationQuote(o: Observation): Quote {
+  const i = instruments.find((i) => i.id === o.instrumentId);
+  if (!i) throw new Error("Unknown engine instrument");
+  validate(o, i, o.provider);
+  const history = o.candles.map((c) => ({ time: c.time, price: c.close }));
+  const stats =
+    history.length >= 15
+      ? indicator(history.map((p) => p.price))
+      : { sma: null, rsi: null };
+  const changes = history
+    .slice(1)
+    .map((p, j) => (p.price / history[j].price - 1) * 100);
+  const mean = changes.length
+    ? changes.reduce((a, b) => a + b, 0) / changes.length
+    : 0;
+  const volatility =
+    changes.length >= 14
+      ? Math.sqrt(
+          changes.reduce((a, b) => a + (b - mean) ** 2, 0) / changes.length,
+        )
+      : null;
+  const volumes = o.candles.slice(-15).map((c) => c.volume);
+  const baseline =
+    volumes.length === 15 && volumes.every((v) => v !== null)
+      ? (volumes.slice(0, -1) as number[]).reduce((a, b) => a + b, 0) / 14
+      : 0;
+  return {
+    ...o,
+    ...stats,
+    symbol: i.symbol,
+    name: i.name,
+    category: i.category,
+    history,
+    volatility,
+    // Compare completed hourly candle volumes with their previous 14-hour average, not daily vs hourly volume.
+    volumeRatio: baseline > 0 ? volumes.at(-1)! / baseline : null,
+    exportAllowed: false,
+  };
+}
+export function mergeObservations(observations: Observation[]) {
+  const live = observations.map(observationQuote);
+  const quotes = live;
+  const stale = quotes.filter((q) => q.status === "stale").map((q) => q.symbol);
+  return {
+    quotes,
+    error:
+      [
+        !quotes.length
+          ? "Native market data unavailable. No demonstration prices are substituted."
+          : "",
+        stale.length ? `Stale observations: ${stale.join(", ")}.` : "",
+      ]
+        .filter(Boolean)
+        .join(" ") || null,
+  };
 }
 const schema = z
   .array(
@@ -105,17 +198,58 @@ export async function market(): Promise<{
   quotes: Quote[];
   error: string | null;
 }> {
+  if (process.env.MARKET_PROVIDER === "multi") {
+    try {
+      const response = await engineFetch("/snapshot");
+      if (!response.ok) throw new Error("Engine unavailable");
+      const payload = await response.json();
+      if (!Array.isArray(payload.observations))
+        throw new Error("Invalid engine response");
+      const { feedConfig } = await import("./feeds/config");
+      const config = feedConfig();
+      const observations = (payload.observations as Observation[])
+        .filter((o) => config.allowed(o.provider, "display"))
+        .map((o) =>
+          Date.now() - Date.parse(o.asOf) > config.staleMs
+            ? {
+                ...o,
+                status: "stale" as const,
+                warning: "Stale observation; not a live quote.",
+              }
+            : o,
+        );
+      const result = mergeObservations(observations);
+      return {
+        ...result,
+        quotes: result.quotes.map((q) => ({
+          ...q,
+          exportAllowed:
+            q.provider === "demo" ||
+            config.allowed(
+              q.provider as import("./feeds/types").ProviderId,
+              "export",
+            ),
+        })),
+      };
+    } catch {
+      return {
+        quotes: [],
+        error:
+          "Shared market engine unavailable. Native prices are unavailable; use attributed visual charts where supported.",
+      };
+    }
+  }
   if (process.env.MARKET_PROVIDER !== "licensed")
-    return { quotes: demoQuotes(), error: null };
+    return { quotes: [], error: "No native market provider is configured." };
   if (
     process.env.MARKET_COMMERCIAL_RIGHTS !== "true" ||
     !process.env.MARKET_API_KEY ||
     !process.env.MARKET_API_URL
   )
     return {
-      quotes: demoQuotes(),
+      quotes: [],
       error:
-        "Licensed feed unavailable: credentials and commercial rights must be configured. Showing demonstration fixtures.",
+        "Licensed feed unavailable: credentials and commercial rights must be configured.",
     };
   if (cache && Date.now() - cache.at < 30000)
     return { quotes: cache.quotes, error: null };
@@ -149,9 +283,9 @@ export async function market(): Promise<{
     }
   }
   return {
-    quotes: demoQuotes(),
+    quotes: [],
     error:
-      "Market provider unavailable or stale. Showing demonstration fixtures.",
+      "Market provider unavailable or stale. No substitute prices are shown.",
   };
 }
 export const demoNews = [

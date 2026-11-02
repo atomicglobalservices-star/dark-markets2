@@ -76,16 +76,16 @@ test("report observations match sources exactly; numeric calculations never come
   assert.equal(r.facts[0].price, quotes[0].price);
   assert.equal(r.dataAsOf[0].timestamp, quotes[0].asOf);
   assert.match(r.interpretation, /synthetic/);
-  assert.equal(r.calculations[0].rsi14, Number(quotes[0].rsi.toFixed(2)));
+  assert.equal(r.calculations[0].rsi14, Number(quotes[0].rsi!.toFixed(2)));
   assert.throws(() => factualReport([]));
 });
-test("unconfigured licensed provider degrades to labelled demo, with error", async () => {
+test("unconfigured licensed provider returns unavailable without fabricated fallback", async () => {
   const old = process.env.MARKET_PROVIDER;
   process.env.MARKET_PROVIDER = "licensed";
   delete process.env.MARKET_API_KEY;
   const r = await market();
   assert.ok(r.error);
-  assert.ok(r.quotes.every((q) => q.status === "demonstration"));
+  assert.equal(r.quotes.length, 0);
   process.env.MARKET_PROVIDER = old;
 });
 
@@ -101,7 +101,7 @@ test("advanced calculations handle flat data and comparisons start at zero", () 
   assert.equal(c.series[0][b.symbol], 0);
 });
 import { generateReport } from "../lib/reports";
-test("AI interpretation rejects invented numerical prose and provider failure", async () => {
+test("subscriber reports reject demo observations before any external AI request", async () => {
   const previous = {
     provider: process.env.AI_PROVIDER,
     key: process.env.AI_API_KEY,
@@ -125,12 +125,12 @@ test("AI interpretation rejects invented numerical prose and provider failure", 
       );
     await assert.rejects(
       () => generateReport("Describe observations", ["BTC"]),
-      /validation/,
+      /Fresh native data/,
     );
     globalThis.fetch = async () => new Response("{}", { status: 503 });
     await assert.rejects(
       () => generateReport("Describe observations", ["BTC"]),
-      /unavailable/,
+      /Fresh native data/,
     );
     globalThis.fetch = async () =>
       new Response(
@@ -146,9 +146,10 @@ test("AI interpretation rejects invented numerical prose and provider failure", 
         }),
         { status: 200 },
       );
-    const report = await generateReport("Describe observations", ["BTC"]);
-    assert.equal(report.content.facts[0].price, 67432.8);
-    assert.equal(report.provider, "openai-compatible");
+    await assert.rejects(
+      () => generateReport("Describe observations", ["BTC"]),
+      /Fresh native data/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of [

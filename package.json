@@ -3,17 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --hostname 0.0.0.0",
+    "dev": "next dev --hostname 127.0.0.1 --port 3100",
     "build": "npm run db:generate && next build",
-    "start": "next start --hostname 0.0.0.0",
-    "test": "tsx --test tests/domain.test.ts",
+    "start": "next start --hostname 127.0.0.1 --port 3100",
+    "test": "tsx --test tests/domain.test.ts tests/feeds.test.ts tests/expansion.test.ts tests/zero-cost.test.ts tests/reliability.test.ts tests/core-markets.test.ts tests/tradingview.test.ts tests/market-directory.test.ts tests/additional-providers.test.ts tests/evaluation-view.test.ts tests/spot-display.test.ts tests/workspace.test.ts tests/trend-pressure.test.ts tests/technical-analysis.test.ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "db:seed": "tsx --env-file-if-exists=.env prisma/seed.ts",
     "worker": "tsx --env-file-if-exists=.env scripts/worker.ts",
     "db:migrate:prisma": "prisma migrate deploy",
     "test:integration": "tsx --env-file-if-exists=.env --test tests/integration.test.ts",
-    "db:generate": "node scripts/generate-client.cjs && node node_modules/@prisma/client/generator-build/index.js < work/prisma-generate.json && node scripts/verify-client.cjs"
+    "db:generate": "node scripts/generate-client.cjs && node node_modules/@prisma/client/generator-build/index.js < work/prisma-generate.json && node scripts/verify-client.cjs",
+    "market:engine": "tsx --env-file-if-exists=.env scripts/market-engine.ts",
+    "test:feeds:integration": "tsx --env-file-if-exists=.env --test tests/feed-integration.test.ts",
+    "test:load": "tsx scripts/load-market.ts",
+    "monitor:24h": "tsx --env-file-if-exists=.env scripts/endurance.ts",
+    "test:free:integration": "tsx --env-file-if-exists=.env --test tests/free-data-integration.test.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "6.19.3",
@@ -22,10 +27,11 @@
     "bcryptjs": "^3.0.2",
     "lucide-react": "^0.468.0",
     "next": "^16.0.0",
-    "nodemailer": "^7.0.0",
+    "nodemailer": "10.3.1",
     "pg": "^8.23.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-grid-layout": "^2.3.0",
     "recharts": "^3.3.0",
     "stripe": "^19.0.0",
     "tailwindcss": "^4.1.0",
@@ -42,5 +48,8 @@
     "prisma": "6.19.3",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2"
   }
 }

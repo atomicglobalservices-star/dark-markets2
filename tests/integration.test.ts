@@ -187,7 +187,14 @@ test("customer journey and authorization against PostgreSQL + HTTP + local SMTP"
           symbols: ["BTC"],
         });
         assert.equal(r.status, 200);
-        assert.equal(r.data.content.facts[0].price, 67432.8);
+        const evidence = r.data.content.dataAsOf[0];
+        if (evidence.status === "demonstration")
+          assert.equal(r.data.content.facts[0].price, 67432.8);
+        else {
+          assert.ok(r.data.content.facts[0].price > 0);
+          assert.ok(evidence.source);
+          assert.ok(Number.isFinite(Date.parse(evidence.timestamp)));
+        }
         assert.equal(r.data.provider, "deterministic");
         assert.ok(
           !(await request("reports", "GET", undefined, otherCookie)).data.some(
@@ -207,13 +214,17 @@ test("customer journey and authorization against PostgreSQL + HTTP + local SMTP"
         );
         assert.equal(
           (await request("reports/download?id=" + r.data.id)).status,
-          200,
+          evidence.exportAllowed === false ? 403 : 200,
         );
       },
     );
     await t.test(
       "alerts persist and worker produces one deduplicated notification",
       async () => {
+        const currentNews = await request("news");
+        const hasStory = currentNews.data.articles.some((n: any) =>
+          n.symbols.includes("BTC"),
+        );
         await request("alerts", "POST", {
           symbol: "BTC",
           kind: "price_above",
@@ -240,12 +251,21 @@ test("customer journey and authorization against PostgreSQL + HTTP + local SMTP"
         const n = (await request("notifications")).data.filter((n: any) =>
           n.title.includes("BTC"),
         );
-        assert.equal(n.length, 2);
+        assert.equal(n.length, hasStory ? 2 : 1);
         assert.equal(
           n.filter((x: any) => x.title.includes("price above")).length,
           1,
         );
-        assert.match(n[0].title, /DEMO/);
+        if (hasStory && currentNews.data.status === "demonstration")
+          assert.ok(
+            n.some((x: any) => /DEMO/.test(x.title)),
+            "Educational news remains demo labelled",
+          );
+        else
+          assert.ok(
+            n.some((x: any) => x.title.includes("price above")),
+            "Real price alert is delivered without fabricating a BTC news story",
+          );
       },
     );
     await t.test(

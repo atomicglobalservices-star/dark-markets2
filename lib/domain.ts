@@ -47,9 +47,9 @@ export function triggers(
   threshold: number,
   quote: {
     price: number;
-    change: number;
-    volumeRatio: number;
-    volatility: number;
+    change: number | null;
+    volumeRatio: number | null;
+    volatility: number | null;
   },
 ) {
   return kind === "price_above"
@@ -57,10 +57,10 @@ export function triggers(
     : kind === "price_below"
       ? quote.price <= threshold
       : kind === "change"
-        ? Math.abs(quote.change) >= threshold
+        ? quote.change !== null && Math.abs(quote.change) >= threshold
         : kind === "volume"
-          ? quote.volumeRatio >= threshold
+          ? quote.volumeRatio !== null && quote.volumeRatio >= threshold
           : kind === "volatility"
-            ? quote.volatility >= threshold
+            ? quote.volatility !== null && quote.volatility >= threshold
             : false;
 }

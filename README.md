@@ -2,11 +2,15 @@
 
 **One World. Every Market. Intelligent Information.** Powered by DARK SYSTEMS (PTY) LTD.
 
-Runnable Next.js App Router / TypeScript application with PostgreSQL, Prisma, Tailwind, Recharts, secure email/password accounts, seven-day trials and server-enforced subscription permissions. DARK OS was not available: the charcoal/lime theme is provisional and centralised in `app/globals.css`. No DARK OS files are used or modified.
+Runnable Next.js App Router / TypeScript application with PostgreSQL, Prisma, Tailwind, Recharts, secure email/password accounts, seven-day trials and server-enforced subscription permissions. The supplied DARK MARKETS branding uses a black, chrome and electric-blue design system centralised in `app/globals.css`.
+
+## Shared market engine (1 November 2026)
+
+The local app runs at **http://localhost:3100** with a shared Binance Spot REST/WebSocket, Coinbase Exchange and Kraken public-data backend, plus CoinGecko and Twelve Data adapters. Connected USD and USDT crypto pairs stay separate and attributed; unsupported markets and anonymous workspaces retain explicit demo labels. No commercial permissions, live payments or public deployment have been activated. See [provider configuration, permissions and validation](docs/MARKET-DATA.md). Start the backend with `npm run market:engine` or `scripts/start-market-engine.ps1`; keep `.env` secrets private.
 
 ## Run locally on Windows
 
-Use Node.js 24 LTS, Git and Docker Desktop with Linux containers. Clone your private repository into `D:\DARK-MARKETS`. This build is in the supplied `dark-markets2` checkout; it has not been published. Connected GitHub inspection found both `dark-markets` and `dark-markets2` are public, contrary to the private-repository requirement. The CLI credential is also invalid, and the available connector cannot change repository visibility.
+Use Node.js 24 LTS, Git and Docker Desktop with Linux containers. Clone your private repository into `D:\DARK-MARKETS`. The configured remote is `atomicglobalservices-star/dark-markets2`, verified private on 2 November 2026. Source control excludes local secrets, dependencies, build output, database contents and runtime evidence. Pushing source does not deploy the application.
 
 PowerShell:
 
@@ -18,7 +22,7 @@ npm run db:generate
 docker compose up -d db mail
 npm run db:migrate
 npm run db:seed
-npm run dev
+npm run dev -- --hostname 127.0.0.1 --port 3100
 ```
 
 In a second terminal:
@@ -28,7 +32,7 @@ Set-Location D:\DARK-MARKETS
 npm run worker
 ```
 
-Open http://localhost:3000. Local emails appear at http://localhost:8025. Register, open the verification email, and confirm it to start the full seven-day trial. There are **no default passwords or seeded user accounts**. The billing page explicitly authorises local test subscriptions; no real card or money is involved. Password-reset messages also arrive in Mailpit.
+Open http://localhost:3100. Local emails appear at http://localhost:8025. Register, open the verification email, and confirm it to start the full seven-day trial. There are **no default passwords or seeded user accounts**. The billing page explicitly authorises local test subscriptions; no real card or money is involved. Password-reset messages also arrive in Mailpit.
 
 To run all services in containers:
 
@@ -79,4 +83,4 @@ Public marketing, pricing ($10 Standard / $19 Premium), registration, hashed pas
 
 ## Production integrations and remaining scope
 
-This is a tested local development implementation, **not a completed commercial launch**. See [deployment instructions](docs/DEPLOYMENT.md) and [implementation status](docs/STATUS.md). Live market feeds, redistributed news/calendar content, a language-model account, production SMTP and Stripe require external credentials/rights and configuration. News/calendar use explicit educational fixtures by default; generic licensed JSON adapters, scheduled ingestion, persistent snapshots and news/event alerts are implemented but need authorised sources. Production cost metering, a richer administration console, observability, MFA and independent security/legal reviews remain. No live charges, external deployment or GitHub publication has occurred.
+This is a tested local development implementation, **not a completed commercial launch**. See [deployment instructions](docs/DEPLOYMENT.md) and [implementation status](docs/STATUS.md). Live market feeds, redistributed news/calendar content, a language-model account, production SMTP and Stripe require external credentials/rights and configuration. News/calendar use explicit educational fixtures by default; generic licensed JSON adapters, scheduled ingestion, persistent snapshots and news/event alerts are implemented but need authorised sources. Production cost metering, a richer administration console, observability, MFA and independent security/legal reviews remain. No live charges or external hosting deployment have been activated.

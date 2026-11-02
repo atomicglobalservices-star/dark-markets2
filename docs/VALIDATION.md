@@ -1,5 +1,13 @@
 # Validation record
 
+## Current local validation - 2 November 2026
+
+Analysis Engine Phase 1: 138 unit tests, TypeScript and production build passed. The read-only central-cache audit verified eight featured crypto/USD instruments on 5m, 1h and 1d; other availability and strict gap/freshness limitations are documented in `technical-analysis-phase1.md`. No UI, feed or monitoring changes were made for Phase 1.
+
+The configured GitHub repository `atomicglobalservices-star/dark-markets2` is now verified private; the earlier visibility blocker below is historical. Local secrets and runtime data remain excluded. No hosting deployment is authorised by a source-control push.
+
+## Historical initial validation
+
 Validated in the managed Linux workspace on 31 October 2026:
 
 - `npm run build`: successful production build, 25 generated pages plus dynamic API.
